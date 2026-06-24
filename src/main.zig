@@ -108,11 +108,31 @@ const KeyAction = enum {
 const C_HL_extensions = [_][]const u8{ ".c", ".h", ".cpp" };
 const C_HL_keywords = [_][]const u8{
     "switch",  "if",   "while", "for",  "break", "continue", "return", "else",    "struct", "union", "typedef",
-    "static",  "enum", "class", "case",
-
-    // C types
-    "int|",  "long|",    "float|", "double|", "char|",  "void|", "unsigned|",
+    "static",  "enum", "class", "case", "int|",  "long|",    "float|", "double|", "char|",  "void|", "unsigned|",
     "signed|",
+};
+
+const ZIG_HL_extensions = [_][]const u8{".zig"};
+const ZIG_HL_keywords = [_][]const u8{
+    "if",       "else",        "while",  "for",      "switch",    "break", "continue",  "return",
+    "fn",       "pub",         "const",  "var",      "comptime",  "try",   "catch",     "defer",
+    "errdefer", "unreachable", "struct", "union",    "enum",      "error", "test",      "inline",
+    "extern",   "export",      "orelse", "and",      "or",        "null",  "undefined", "bool|",
+    "u8|",      "u16|",        "u32|",   "u64|",     "u128|",     "i8|",   "i16|",      "i32|",
+    "i64|",     "i128|",       "f16|",   "f32|",     "f64|",      "f128|", "usize|",    "isize|",
+    "void|",    "noreturn|",   "type|",  "anytype|", "anyerror|",
+};
+
+const NIM_HL_extensions = [_][]const u8{ ".nim", ".nims" };
+const NIM_HL_keywords = [_][]const u8{
+    "if",       "elif",     "else",   "when",     "while",    "for",     "case",    "of",
+    "break",    "continue", "return", "yield",    "try",      "except",  "finally", "raise",
+    "proc",     "func",     "method", "iterator", "template", "macro",   "type",    "var",
+    "let",      "const",    "import", "export",   "include",  "from",    "block",   "object",
+    "enum",     "and",      "or",     "not",      "in",       "notin",   "is",      "isnot",
+    "nil",      "true",     "false",  "discard",  "do",       "int|",    "int8|",   "int16|",
+    "int32|",   "int64|",   "uint|",  "uint8|",   "uint16|",  "uint32|", "uint64|", "float|",
+    "float32|", "float64|", "bool|",  "char|",    "string|",  "seq|",    "void|",   "auto|",
 };
 
 const HLDB = [_]EditorSyntax{
@@ -123,6 +143,24 @@ const HLDB = [_]EditorSyntax{
         .singleline_comment_start = "//",
         .multiline_comment_start = "/*",
         .multiline_comment_end = "*/",
+        .flags = HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+    },
+    .{
+        .filetype = "zig",
+        .filematch = &ZIG_HL_extensions,
+        .keywords = &ZIG_HL_keywords,
+        .singleline_comment_start = "//",
+        .multiline_comment_start = null,
+        .multiline_comment_end = null,
+        .flags = HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
+    },
+    .{
+        .filetype = "nim",
+        .filematch = &NIM_HL_extensions,
+        .keywords = &NIM_HL_keywords,
+        .singleline_comment_start = "#",
+        .multiline_comment_start = "#[",
+        .multiline_comment_end = "]#",
         .flags = HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS,
     },
 };
