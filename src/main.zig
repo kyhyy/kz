@@ -2,7 +2,7 @@
 const std = @import("std");
 const heap = @import("std").heap;
 const mem = @import("std").mem;
-const fs = @import("std").fs;
+const Io = @import("std").Io;
 
 //*** defines ***//
 fn CTRL_KEY(comptime k: u8) u8 {
@@ -39,6 +39,7 @@ const EditorSyntax = struct {
 };
 
 //*** data ***//
+var io: Io = undefined;
 var fnPressed: bool = false; // Global FN flag
 var quit_times: u8 = KZ_QUIT_TIMES; // Global quit times counter
 
@@ -68,7 +69,7 @@ const EditorConfig = struct {
     dirty: u16,
 
     statusmsg: [80]u8,
-    statusmsg_time: i64,
+    statusmsg_time: i128,
 
     syntax: ?*const EditorSyntax,
 
@@ -129,7 +130,7 @@ const HLDB = [_]EditorSyntax{
 //*** terminal ***//
 // Function to restore the original terminal settings
 export fn disableRawMode() void {
-    std.posix.tcsetattr(std.fs.File.stdin().handle, .FLUSH, E.orig_termios) catch {
+    std.posix.tcsetattr(Io.File.stdin().handle, .FLUSH, E.orig_termios) catch {
         std.debug.print("Error: Failed to restore terminal settings\n", .{});
         std.process.exit(1);
     };
@@ -138,7 +139,7 @@ export fn disableRawMode() void {
 fn die(msg: []const u8) noreturn {
     // Create buffer for stdout
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     stdout.writeAll("\x1b[2J") catch {};
@@ -151,7 +152,7 @@ fn die(msg: []const u8) noreturn {
 
 // Function to enable raw mode in the terminal
 fn enableRawMode() !void {
-    const stdin = std.fs.File.stdin().handle;
+    const stdin = Io.File.stdin().handle;
 
     E.orig_termios = std.posix.tcgetattr(stdin) catch {
         std.debug.print("Error: Could not get terminal attributes\n", .{});
@@ -187,9 +188,9 @@ fn enableRawMode() !void {
 
 fn editorReadKey() !u16 {
     var buf: [1]u8 = undefined;
-    const stdin_file = std.fs.File.stdin();
+    const stdin_file = Io.File.stdin();
     var stdin_buffer: [1024]u8 = undefined;
-    var stdin_reader = stdin_file.reader(&stdin_buffer);
+    var stdin_reader = stdin_file.reader(io, &stdin_buffer);
     const stdin = &stdin_reader.interface;
 
     while (true) {
@@ -688,20 +689,20 @@ fn editorOpen(allocator: mem.Allocator, filename: []const u8) !void {
     E.filename = try allocator.dupe(u8, filename);
     editorSelectSyntaxHighlight(allocator);
 
-    const file = fs.cwd().openFile(filename, .{ .mode = .read_only }) catch |err| {
+    const file = Io.Dir.cwd().openFile(io, filename, .{ .mode = .read_only }) catch |err| {
         if (err == error.FileNotFound) {
             return;
         }
         return err;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const file_size = try file.getEndPos();
+    const file_size = try file.length(io);
     const file_contents = try allocator.alloc(u8, file_size);
     defer allocator.free(file_contents);
 
     var file_buffer: [4096]u8 = undefined;
-    var file_reader = file.reader(&file_buffer);
+    var file_reader = file.reader(io, &file_buffer);
     const reader = &file_reader.interface;
 
     try reader.*.readSliceAll(file_contents);
@@ -744,10 +745,10 @@ fn editorSave(allocator: mem.Allocator) !void {
     const filename = E.filename.?; // Safe because we checked for null in first line
 
     // Open file for read/write, create if it doesn't exist
-    if (fs.cwd().createFile(filename, .{ .read = true, .truncate = true })) |file| {
-        defer file.close();
+    if (Io.Dir.cwd().createFile(io, filename, .{ .truncate = true })) |file| {
+        defer file.close(io);
         // Try to write
-        if (file.writeAll(buf)) |_| {
+        if (file.writeStreamingAll(io, buf)) |_| {
             E.dirty = 0;
             editorSetStatusMessage("{d} bytes written to disk", .{buf.len});
             return;
@@ -904,7 +905,7 @@ fn editorDrawMessageBar(list_writer: anytype) !void {
     if (msg_len > E.screencols) {
         msg_len = E.screencols;
     }
-    if (msg_len > 0 and std.time.timestamp() - E.statusmsg_time < 5) {
+    if (msg_len > 0 and Io.Timestamp.now(io, .real).nanoseconds - E.statusmsg_time < 5 * std.time.ns_per_s) {
         try list_writer.writeAll(E.statusmsg[0..msg_len]);
     }
 }
@@ -912,9 +913,10 @@ fn editorDrawMessageBar(list_writer: anytype) !void {
 fn editorRefreshScreen(allocator: mem.Allocator) !void {
     try editorScroll();
 
-    var buf = std.array_list.Managed(u8).init(allocator);
-    defer buf.deinit();
-    var list_writer = buf.writer();
+    var initial_buf = std.ArrayList(u8).empty;
+    var alloc_writer = std.Io.Writer.Allocating.fromArrayList(allocator, &initial_buf);
+    defer alloc_writer.deinit();
+    const list_writer = &alloc_writer.writer;
 
     try list_writer.writeAll("\x1b[?25l");
     try list_writer.writeAll("\x1b[H");
@@ -928,9 +930,9 @@ fn editorRefreshScreen(allocator: mem.Allocator) !void {
     try list_writer.writeAll("\x1b[?25h");
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
-    try stdout.writeAll(buf.items);
+    try stdout.writeAll(list_writer.buffer[0..list_writer.end]);
     try stdout.flush();
 }
 
@@ -1014,7 +1016,7 @@ fn editorSetStatusMessage(comptime fmt: []const u8, args: anytype) void {
     if (message.len < E.statusmsg.len) {
         E.statusmsg[message.len] = 0;
     }
-    E.statusmsg_time = std.time.timestamp();
+    E.statusmsg_time = Io.Timestamp.now(io, .real).nanoseconds;
 }
 
 //*** input ***//
@@ -1114,7 +1116,7 @@ fn editorProcessKeypress(allocator: mem.Allocator) !KeyAction {
             }
 
             var stdout_buffer: [1024]u8 = undefined;
-            var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+            var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
             const stdout = &stdout_writer.interface;
 
             try stdout.writeAll("\x1b[2J");
@@ -1216,17 +1218,15 @@ fn initEditor() void {
     E.screenrows -= 2;
 }
 
-pub fn main() anyerror!void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) anyerror!void {
+    io = init.io;
+    const allocator = init.arena.allocator();
 
     try enableRawMode();
     defer disableRawMode();
     initEditor();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(allocator);
 
     if (args.len > 1) {
         try editorOpen(allocator, args[1]);
