@@ -737,6 +737,9 @@ fn editorUndo(allocator: mem.Allocator) !void {
                 try editorInsertNewline(allocator);
             },
             .insert_newline => {
+                var i: usize = 0;
+                while (i < entry.c and entry.cy + 1 < E.numrows) : (i += 1)
+                    try editorRowDelChar(allocator, &E.rows[entry.cy + 1], 0);
                 E.cx = 0;
                 E.cy = entry.cy + 1;
                 try editorDelChar(allocator);
@@ -791,21 +794,30 @@ fn editorRedo(allocator: mem.Allocator) !void {
 }
 
 fn editorInsertNewline(allocator: mem.Allocator) !void {
-    pushUndo(.{ .kind = .insert_newline, .cx = E.cx, .cy = E.cy, .c = 0 });
+    var indent_len: usize = 0;
+    if (E.cy < E.numrows and E.cx > 0) {
+        const row = &E.rows[E.cy];
+        while (indent_len < E.cx and (row.chars[indent_len] == ' ' or row.chars[indent_len] == '\t')) : (indent_len += 1) {}
+    }
+    pushUndo(.{ .kind = .insert_newline, .cx = E.cx, .cy = E.cy, .c = @intCast(indent_len) });
     if (E.cx == 0) {
         try editorInsertRow(allocator, E.cy, "");
     } else {
-        var row = &E.rows[E.cy];
-        try editorInsertRow(allocator, E.cy + 1, row.chars[E.cx..row.size]);
+        const row = &E.rows[E.cy];
+        const rest = row.chars[E.cx..row.size];
+        const new_content = try allocator.alloc(u8, indent_len + rest.len);
+        defer allocator.free(new_content);
+        @memcpy(new_content[0..indent_len], row.chars[0..indent_len]);
+        @memcpy(new_content[indent_len..], rest);
+        try editorInsertRow(allocator, E.cy + 1, new_content);
 
-        row = &E.rows[E.cy];
-
-        row.size = E.cx;
-        row.chars[row.size] = 0;
-        try editorUpdateRow(allocator, row);
+        const row2 = &E.rows[E.cy];
+        row2.size = E.cx;
+        row2.chars[row2.size] = 0;
+        try editorUpdateRow(allocator, row2);
     }
     E.cy += 1;
-    E.cx = 0;
+    E.cx = @intCast(indent_len);
 }
 
 //*** file i/o ***//
