@@ -878,6 +878,13 @@ fn editorFind(allocator: mem.Allocator) !void {
 }
 
 //*** output ***//
+fn lineNumWidth() usize {
+    var n = if (E.numrows > 0) E.numrows else 1;
+    var w: usize = 1;
+    while (n >= 10) : (n /= 10) w += 1;
+    return w + 1; // digits + trailing space
+}
+
 fn editorScroll() !void {
     E.rx = 0;
     if (E.cy < E.numrows) {
@@ -893,8 +900,9 @@ fn editorScroll() !void {
     if (E.rx < E.coloff) {
         E.coloff = E.rx;
     }
-    if (E.rx >= E.coloff + E.screencols) {
-        E.coloff = E.rx - E.screencols + 1;
+    const content_cols = E.screencols - @as(u16, @intCast(lineNumWidth()));
+    if (E.rx >= E.coloff + content_cols) {
+        E.coloff = E.rx - content_cols + 1;
     }
 }
 
@@ -963,7 +971,7 @@ fn editorRefreshScreen(allocator: mem.Allocator) !void {
     try editorDrawStatusBar(list_writer);
     try editorDrawMessageBar(list_writer);
 
-    try list_writer.print("\x1b[{d};{d}H", .{ (E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1 });
+    try list_writer.print("\x1b[{d};{d}H", .{ (E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1 + lineNumWidth() });
 
     try list_writer.writeAll("\x1b[?25h");
 
@@ -975,6 +983,8 @@ fn editorRefreshScreen(allocator: mem.Allocator) !void {
 }
 
 fn editorDrawRows(writer: anytype) !void {
+    const lnw = lineNumWidth();
+    const content_cols = E.screencols - @as(u16, @intCast(lnw));
     var y: usize = 0;
     while (y < E.screenrows) : (y += 1) {
         const filerow = y + E.rowoff;
@@ -983,19 +993,29 @@ fn editorDrawRows(writer: anytype) !void {
                 var welcome: [80]u8 = undefined;
                 const welcome_msg = try std.fmt.bufPrint(&welcome, "kz editor -- version {s}", .{kz_version});
 
-                const display_len = @min(welcome_msg.len, E.screencols);
-                const padding = (E.screencols - display_len) / 2;
+                const display_len = @min(welcome_msg.len, content_cols);
+                const padding = (content_cols - display_len) / 2;
 
+                var g: usize = 0;
+                while (g < lnw) : (g += 1) try writer.writeByte(' ');
                 var i: usize = 0;
-                while (i < padding) : (i += 1) {
-                    try writer.writeAll(" ");
-                }
-
+                while (i < padding) : (i += 1) try writer.writeByte(' ');
                 try writer.writeAll(welcome_msg[0..display_len]);
             } else {
+                var g: usize = 0;
+                while (g < lnw) : (g += 1) try writer.writeByte(' ');
                 try writer.writeAll("~");
             }
         } else {
+            var lnbuf: [16]u8 = undefined;
+            const lnstr = std.fmt.bufPrint(&lnbuf, "{d}", .{filerow + 1}) catch unreachable;
+            try writer.writeAll("\x1b[2m");
+            var pad: usize = lnw - 1 - lnstr.len;
+            while (pad > 0) : (pad -= 1) try writer.writeByte(' ');
+            try writer.writeAll(lnstr);
+            try writer.writeByte(' ');
+            try writer.writeAll("\x1b[m");
+
             const row = E.rows[filerow];
             var len = row.rsize;
 
@@ -1005,7 +1025,7 @@ fn editorDrawRows(writer: anytype) !void {
                 len -= E.coloff;
             }
 
-            if (len > E.screencols) len = E.screencols;
+            if (len > content_cols) len = content_cols;
 
             if (len > 0) {
                 const c = row.render[E.coloff .. E.coloff + len];
