@@ -43,6 +43,15 @@ var io: Io = undefined;
 var fnPressed: bool = false; // Global FN flag
 var quit_times: u8 = KZ_QUIT_TIMES; // Global quit times counter
 
+const UNDO_MAX = 1024;
+const UndoKind = enum { insert_char, delete_char, delete_newline, insert_newline };
+const UndoEntry = struct { kind: UndoKind, cx: u16, cy: u16, c: u8, new_group: bool = false };
+var undo_stack: [UNDO_MAX]UndoEntry = undefined;
+var undo_len: usize = 0;
+var redo_stack: [UNDO_MAX]UndoEntry = undefined;
+var redo_len: usize = 0;
+var is_undoing: bool = false;
+
 const Erow = struct {
     idx: usize, // Row index in the file
     size: usize, // Raw string size
@@ -651,7 +660,26 @@ fn editorSelectSyntaxHighlight(allocator: mem.Allocator) void {
 }
 
 //*** editor operations ***//
+fn pushUndo(entry_in: UndoEntry) void {
+    if (is_undoing) return;
+    redo_len = 0;
+    if (undo_len >= UNDO_MAX) return;
+    var entry = entry_in;
+    entry.new_group = if (undo_len == 0) true else blk: {
+        const prev = undo_stack[undo_len - 1];
+        if (prev.kind != entry.kind) break :blk true;
+        break :blk switch (entry.kind) {
+            .insert_char => entry.cy != prev.cy or entry.cx != prev.cx + 1 or isSeparator(entry.c) or isSeparator(prev.c),
+            .delete_char => entry.cy != prev.cy or entry.cx != prev.cx - 1 or isSeparator(entry.c) or isSeparator(prev.c),
+            else => true,
+        };
+    };
+    undo_stack[undo_len] = entry;
+    undo_len += 1;
+}
+
 fn editorInsertChar(allocator: mem.Allocator, c: u8) !void {
+    pushUndo(.{ .kind = .insert_char, .cx = E.cx, .cy = E.cy, .c = c });
     if (E.cy == E.numrows) {
         try editorInsertRow(allocator, E.numrows, "");
     }
@@ -670,9 +698,11 @@ fn editorDelChar(allocator: mem.Allocator) !void {
 
     const row = &E.rows[E.cy];
     if (E.cx > 0) {
+        pushUndo(.{ .kind = .delete_char, .cx = E.cx, .cy = E.cy, .c = row.chars[E.cx - 1] });
         try editorRowDelChar(allocator, row, E.cx - 1);
         E.cx -= 1;
     } else {
+        pushUndo(.{ .kind = .delete_newline, .cx = @intCast(E.rows[E.cy - 1].size), .cy = E.cy - 1, .c = 0 });
         E.cx = @intCast(E.rows[E.cy - 1].size);
         try editorRowAppendString(allocator, &E.rows[E.cy - 1], row.chars[0..row.size]);
         editorDelRow(allocator, E.cy);
@@ -680,7 +710,88 @@ fn editorDelChar(allocator: mem.Allocator) !void {
     }
 }
 
+fn editorUndo(allocator: mem.Allocator) !void {
+    if (undo_len == 0) {
+        editorSetStatusMessage("Nothing to undo", .{});
+        return;
+    }
+    is_undoing = true;
+    defer is_undoing = false;
+    while (undo_len > 0) {
+        undo_len -= 1;
+        const entry = undo_stack[undo_len];
+        switch (entry.kind) {
+            .insert_char => {
+                E.cx = entry.cx + 1;
+                E.cy = entry.cy;
+                try editorDelChar(allocator);
+            },
+            .delete_char => {
+                E.cx = entry.cx - 1;
+                E.cy = entry.cy;
+                try editorInsertChar(allocator, entry.c);
+            },
+            .delete_newline => {
+                E.cx = entry.cx;
+                E.cy = entry.cy;
+                try editorInsertNewline(allocator);
+            },
+            .insert_newline => {
+                E.cx = 0;
+                E.cy = entry.cy + 1;
+                try editorDelChar(allocator);
+            },
+        }
+        if (redo_len < UNDO_MAX) {
+            redo_stack[redo_len] = entry;
+            redo_len += 1;
+        }
+        if (entry.new_group) break;
+    }
+}
+
+fn editorRedo(allocator: mem.Allocator) !void {
+    if (redo_len == 0) {
+        editorSetStatusMessage("Nothing to redo", .{});
+        return;
+    }
+    is_undoing = true;
+    defer is_undoing = false;
+    while (redo_len > 0) {
+        redo_len -= 1;
+        const entry = redo_stack[redo_len];
+        switch (entry.kind) {
+            .insert_char => {
+                E.cx = entry.cx;
+                E.cy = entry.cy;
+                try editorInsertChar(allocator, entry.c);
+            },
+            .delete_char => {
+                E.cx = entry.cx;
+                E.cy = entry.cy;
+                try editorDelChar(allocator);
+            },
+            .delete_newline => {
+                E.cx = 0;
+                E.cy = entry.cy + 1;
+                try editorDelChar(allocator);
+            },
+            .insert_newline => {
+                E.cx = entry.cx;
+                E.cy = entry.cy;
+                try editorInsertNewline(allocator);
+            },
+        }
+        if (undo_len < UNDO_MAX) {
+            undo_stack[undo_len] = entry;
+            undo_len += 1;
+        }
+        if (redo_len == 0 or redo_stack[redo_len - 1].new_group) break;
+    }
+}
+
 fn editorInsertNewline(allocator: mem.Allocator) !void {
+    pushUndo(.{ .kind = .insert_newline, .cx = E.cx, .cy = E.cy, .c = 0 });
     if (E.cx == 0) {
         try editorInsertRow(allocator, E.cy, "");
     } else {
@@ -1197,6 +1308,15 @@ fn editorProcessKeypress(allocator: mem.Allocator) !KeyAction {
             return .NoOp;
         },
 
+        CTRL_KEY('z') => {
+            try editorUndo(allocator);
+            return .NoOp;
+        },
+        CTRL_KEY('y') => {
+            try editorRedo(allocator);
+            return .NoOp;
+        },
+
         CTRL_KEY('f') => {
             try editorFind(allocator);
             return .NoOp;
@@ -1267,6 +1387,8 @@ fn initEditor() void {
     E.statusmsg[0] = 0;
     E.statusmsg_time = 0;
     E.syntax = null;
+    undo_len = 0;
+    redo_len = 0;
 
     getWindowSize(&E.screenrows, &E.screencols) catch {
         // Fallback values if we can't get terminal size for some reason
@@ -1290,7 +1412,7 @@ pub fn main(init: std.process.Init) anyerror!void {
         try editorOpen(allocator, args[1]);
     }
 
-    editorSetStatusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save | Ctrl-F = find", .{});
+    editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find | Ctrl-Z = undo | Ctrl-Y = redo", .{});
 
     while (true) {
         try editorRefreshScreen(allocator);
